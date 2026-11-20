@@ -20,7 +20,7 @@ async function refreshEvents(){if(!connected){$('#signal').textContent='SIGNAL: 
 function eventLog(){show('EVENT LOG',`<p>INCOMING TRANSMISSIONS // ${events.length} RECORDS</p>${events.map(e=>`<div class="entry"><button data-event="${e.id}">${read().has(String(e.id))?'':'● '}${safe(e.title)}</button><small>${new Date(e.published_at).toLocaleString('ru-RU')} ${e.critical?' // CRITICAL':''}</small></div>`).join('')||'<p>NO TRANSMISSIONS</p>'}`);body.querySelectorAll('[data-event]').forEach(b=>b.onclick=()=>{const e=events.find(x=>x.id===b.dataset.event);if(!e)return;const seen=read();seen.add(String(e.id));localStorage.setItem('pd_read',JSON.stringify([...seen]));updateCount();show('EVENT LOG / FILE',`<h3>${safe(e.title)}</h3><p style="white-space:pre-wrap">${safe(e.content)}</p><button id="backEvents">RETURN</button>`);$('#backEvents').onclick=eventLog})}
 function terminal(){show('COMMAND.EXE',`<p>HNL SYSTEM // ENTER COMMAND</p><form id="commandForm"><input id="cmd" autocomplete="off" placeholder="C:\\HNL>" required><button>EXECUTE</button></form><pre id="output">TYPE HELP</pre>`);$('#commandForm').onsubmit=e=>{e.preventDefault();const cmd=$('#cmd').value.trim().toUpperCase();$('#cmd').value='';tone();if(cmd==='DIRECTOR')login();else if(cmd==='EXIT')hide();else if(cmd==='HELP')$('#output').textContent='HELP / STATUS / SIGNAL / CLEAR / EXIT / DIRECTOR\nCLASSIFIED FILE ACCESS: COMING IN SECURE MODULE';else if(cmd==='STATUS')$('#output').textContent='QUARANTINE: ACTIVE\nCONTAINMENT: FAILED';else if(cmd==='SIGNAL')$('#output').textContent=$('#signal').textContent;else if(cmd==='CLEAR')$('#output').textContent='';else $('#output').textContent='ACCESS DENIED — SECURE ARCHIVE NOT CONNECTED'} }
 async function isAdmin(){if(!connected)return false;const {data:{user}}=await db.auth.getUser();if(!user)return false;const r=await db.from('directors').select('user_id').eq('user_id',user.id).maybeSingle();return !r.error&&!!r.data}
-// A shared Supabase Auth account is used by all directors. No secret is embedded in the frontend.
+// Each director uses their own Supabase Auth account and a unique login alias.
 const IDLE_MS=30*60*1000;
 let idleTimer=null, idleListenersInstalled=false;
 function resetIdle(){if(!admin)return;clearTimeout(idleTimer);idleTimer=setTimeout(async()=>{await logout();toast('DIRECTOR SESSION EXPIRED // 30 MIN INACTIVITY')},IDLE_MS)}
@@ -28,26 +28,42 @@ function watchIdle(){if(!idleListenersInstalled){for(const name of ['pointerdown
 async function login(){
  if(!needConnection())return;
  try{if(await isAdmin()){admin=true;watchIdle();director();return}}catch{}
- show('DIRECTOR AUTHORIZATION',`<p>Общий аккаунт DIRECTOR. Первый запуск: <button type="button" id="setupDirector">INITIAL SETUP</button></p><form id="login"><label>Общий email (логин)<input id="email" type="email" required autocomplete="username"></label><label>Общий пароль<input id="password" type="password" required autocomplete="current-password"></label><button>AUTHORIZE</button></form>`);
- $('#setupDirector').onclick=setupDirector;
- $('#login').onsubmit=async e=>{e.preventDefault();try{check(await db.auth.signInWithPassword({email:$('#email').value.trim(),password:$('#password').value}));admin=await isAdmin();if(!admin){await db.auth.signOut();throw Error('ACCESS DENIED: нет прав DIRECTOR')}watchIdle();director()}catch(err){fail(err)}}
+ show('DIRECTOR AUTHORIZATION',`<p>Введите имя администратора и пароль.</p><form id="login"><label>Имя администратора<input id="directorName" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}" required autocomplete="username" placeholder="Например: VERONIKA"></label><label>Пароль<input id="password" type="password" required autocomplete="current-password"></label><button>AUTHORIZE</button></form><div class="toolbar"><button type="button" id="bindDirector">ПЕРВЫЙ ВХОД / ВЫБРАТЬ ИМЯ</button></div>`);
+ $('#bindDirector').onclick=bindDirector;
+ $('#login').onsubmit=async e=>{e.preventDefault();try{
+  const name=$('#directorName').value.trim();
+  const email=check(await db.rpc('director_login_email',{login_name:name}));
+  if(!email)throw Error('Неверное имя администратора или пароль');
+  check(await db.auth.signInWithPassword({email,password:$('#password').value}));
+  admin=await isAdmin();if(!admin){await db.auth.signOut();throw Error('ACCESS DENIED: нет прав DIRECTOR')}
+  watchIdle();director();
+ }catch(err){fail(err)}};
 }
-function setupDirector(){
- show('DIRECTOR / INITIAL SETUP',`<p>Одноразовая настройка общего аккаунта. Требуется установочный код, заранее заданный владельцем в Supabase Edge Function Secrets. После первого успешного создания регистрация блокируется на сервере.</p><form id="setupForm"><label>Установочный код<input id="setupCode" type="password" minlength="16" required autocomplete="off"></label><label>Общий email (логин)<input id="setupEmail" type="email" required autocomplete="username"></label><label>Общий пароль (не менее 12 символов)<input id="setupPassword" type="password" minlength="12" required autocomplete="new-password"></label><button>CREATE DIRECTOR</button></form><button type="button" id="backLogin">RETURN</button>`);
+async function bindDirector(){
+ if(!needConnection())return;
+ show('DIRECTOR / FIRST LOGIN',`<p>Один раз подтвердите существующую учётную запись Supabase, затем выберите любое свободное имя администратора. Email после этого для входа на сайт не понадобится.</p><form id="bindForm"><label>Email, зарегистрированный в Supabase<input id="bindEmail" type="email" required autocomplete="email"></label><label>Пароль учётной записи<input id="bindPassword" type="password" required autocomplete="current-password"></label><label>Новое имя администратора<input id="bindName" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}" required placeholder="Например: VERONIKA"></label><button>СОХРАНИТЬ ИМЯ И ВОЙТИ</button></form><button type="button" id="backLogin">RETURN</button>`);
  $('#backLogin').onclick=login;
- $('#setupForm').onsubmit=async e=>{e.preventDefault();const btn=$('#setupForm button');btn.disabled=true;try{
- const r=await fetch(`${cfg.supabaseUrl.replace(/\/$/,'')}/functions/v1/director-bootstrap`,{method:'POST',headers:{'Content-Type':'application/json','apikey':cfg.supabaseAnonKey},body:JSON.stringify({setupCode:$('#setupCode').value,email:$('#setupEmail').value.trim(),password:$('#setupPassword').value})});
- const result=await r.json().catch(()=>({}));if(!r.ok)throw Error(result.error||`SETUP FAILED (${r.status})`);
- toast('DIRECTOR CREATED');await db.auth.signInWithPassword({email:$('#setupEmail').value.trim(),password:$('#setupPassword').value});admin=await isAdmin();if(!admin)throw Error('Аккаунт создан, но права не подтверждены');watchIdle();director();
- }catch(err){fail(err)}finally{btn.disabled=false}}
+ $('#bindForm').onsubmit=async e=>{e.preventDefault();try{
+  const email=$('#bindEmail').value.trim(),password=$('#bindPassword').value;
+  check(await db.auth.signInWithPassword({email,password}));
+  if(!await isAdmin()){await db.auth.signOut();throw Error('У этой учётной записи нет прав DIRECTOR')}
+  check(await db.rpc('set_director_login',{new_login:$('#bindName').value.trim()}));
+  admin=true;watchIdle();toast('ИМЯ АДМИНИСТРАТОРА СОХРАНЕНО');director();
+ }catch(err){fail(err)}};
 }
 async function logout(){clearTimeout(idleTimer);if(connected)await db.auth.signOut();admin=false;hide()}
 async function changePassword(){
- if(!admin)return login();show('DIRECTOR / CHANGE PASSWORD',`<p>Новый пароль будет общим для всей администрации. Смена пароля сама по себе не гарантирует завершения других открытых сеансов.</p><form id="changePassword"><label>Новый пароль<input id="newPassword" type="password" minlength="12" autocomplete="new-password" required></label><button>UPDATE PASSWORD</button></form><button id="backDirector" type="button">RETURN</button>`);
+ if(!admin)return login();show('DIRECTOR / CHANGE PASSWORD',`<p>Пароль изменится только у вашей учётной записи. Смена пароля не гарантирует завершения других открытых сеансов.</p><form id="changePassword"><label>Новый пароль<input id="newPassword" type="password" minlength="12" autocomplete="new-password" required></label><button>UPDATE PASSWORD</button></form><button id="backDirector" type="button">RETURN</button>`);
  $('#backDirector').onclick=director;
  $('#changePassword').onsubmit=async e=>{e.preventDefault();try{check(await db.auth.updateUser({password:$('#newPassword').value}));toast('PASSWORD UPDATED');director()}catch(err){fail(err)}}
 }
-function director(){if(!admin)return login();resetIdle();show('DIRECTOR CONTROL // LEVEL 5',`<div class="buttons">${['DOCUMENTS','ACCESS KEYS','TRANSMISSIONS','EVENT CONTROL','ANOMALIES','SYSTEM LOG','CHARACTERS'].map((s,i)=>`<button data-tab="${i}">${s}</button>`).join('')}</div><div class="toolbar"><button id="changePasswordButton">CHANGE PASSWORD</button><button id="logout">LOG OUT</button></div>`);body.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>adminTab(Number(b.dataset.tab)));$('#logout').onclick=logout;$('#changePasswordButton').onclick=changePassword}
+function director(){if(!admin)return login();resetIdle();show('DIRECTOR CONTROL // LEVEL 5',`<div class="buttons">${['DOCUMENTS','ACCESS KEYS','TRANSMISSIONS','EVENT CONTROL','ANOMALIES','SYSTEM LOG','CHARACTERS'].map((s,i)=>`<button data-tab="${i}">${s}</button>`).join('')}</div><div class="toolbar"><button id="changePasswordButton">CHANGE PASSWORD</button><button id="changeNameButton">CHANGE LOGIN NAME</button><button id="logout">LOG OUT</button></div>`);body.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>adminTab(Number(b.dataset.tab)));$('#logout').onclick=logout;$('#changePasswordButton').onclick=changePassword;$('#changeNameButton').onclick=changeDirectorName}
+async function changeDirectorName(){
+ if(!admin)return login();
+ show('DIRECTOR / CHANGE LOGIN',`<form id="changeNameForm"><label>Новое имя администратора<input id="newDirectorName" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}" required></label><button>SAVE LOGIN</button></form><button id="backDirector" type="button">RETURN</button>`);
+ $('#backDirector').onclick=director;
+ $('#changeNameForm').onsubmit=async e=>{e.preventDefault();try{check(await db.rpc('set_director_login',{new_login:$('#newDirectorName').value.trim()}));toast('LOGIN UPDATED');director()}catch(err){fail(err)}};
+}
 async function adminTab(i){if(!admin)return login();if(i===6)return characterAdmin();if(i===3)return eventAdmin();show('DIRECTOR / '+['DOCUMENTS','ACCESS KEYS','TRANSMISSIONS','EVENT CONTROL','ANOMALIES','SYSTEM LOG'][i],`<p>Этот модуль пока не перенесён в защищённую облачную версию. Данные секретных документов нельзя публиковать в открытой базе.</p><button id="back">RETURN</button>`);$('#back').onclick=director}
 const STATUSES={alive:'Жив',injured:'Ранен',unconscious:'Без сознания',critical:'Критическое состояние',dead:'Погиб',missing:'Пропал без вести'};
 const INFECTIONS={none:'Отсутствует',low:'Низкое',medium:'Среднее',critical:'Критическое'};
