@@ -86,10 +86,44 @@ async function secretDocumentsAdmin(){
   body.querySelectorAll('[data-secret-delete]').forEach(b=>b.onclick=async()=>{if(!confirm('Удалить секретный документ? Связанные коды могут перестать работать.'))return;try{check(await db.rpc('director_delete_secret_document',{p_document_id:b.dataset.secretDelete}));toast('ДОКУМЕНТ УДАЛЁН');secretDocumentsAdmin()}catch(err){fail(err)}});
  }catch(err){fail(err)}
 }
+// Images are embedded as [[image:storage/path.jpg]] markers inside the document body.
+// The bucket remains private. Administrator previews use short-lived signed URLs.
+const SECRET_IMAGE_PATTERN=/\[\[image:([^\]\r\n]+)\]\]/g;
+const SECRET_IMAGE_TYPES={'image/jpeg':'jpg','image/png':'png','image/webp':'webp'};
+async function renderSecretImagePreview(){
+ const target=$('#secretImagePreview'),field=$('#secretBody');if(!target||!field)return;
+ const paths=[...field.value.matchAll(SECRET_IMAGE_PATTERN)].map(m=>m[1]);
+ if(!paths.length){target.innerHTML='<p>Изображений пока нет. Добавьте файл, чтобы вставить его в текст.</p>';return}
+ target.textContent='ЗАГРУЗКА ПРЕДПРОСМОТРА...';
+ const nodes=[];
+ for(const path of paths){
+  // Avoid signing arbitrary paths: previews are for administrator-owned files only.
+  const r=await db.storage.from('secret-documents').createSignedUrl(path,60);
+  if(r.error){nodes.push(`<div class="entry">${safe(path)} — предпросмотр недоступен</div>`);continue}
+  nodes.push(`<figure style="margin:12px 0"><img style="display:block;max-width:100%;max-height:340px;object-fit:contain" src="${safe(r.data.signedUrl)}" alt="Иллюстрация секретного документа"><figcaption>${safe(path)}</figcaption></figure>`);
+ }
+ if($('#secretImagePreview')===target)target.innerHTML=nodes.join('');
+}
 function secretDocumentForm(d){
  if(!admin)return login();
- show(d?'АДМИНИСТРАТОР / РЕДАКТИРОВАНИЕ ДОКУМЕНТА':'АДМИНИСТРАТОР / НОВЫЙ ДОКУМЕНТ',`<form id="secretDocumentForm"><label>Название<input id="secretTitle" required maxlength="200" value="${safe(d?.title||'')}"></label><label>Текст документа<textarea id="secretBody" rows="12"></textarea></label><label>Путь к файлу в закрытом хранилище (необязательно)<input id="secretPath" value="${safe(d?.storage_path||'')}"></label>${d?`<label><input id="secretActive" type="checkbox" ${d.is_active!==false?'checked':''}> Документ активен</label>`:''}<div class="toolbar"><button>СОХРАНИТЬ</button><button id="cancelSecret" type="button">ОТМЕНА</button></div></form>`);
+ show(d?'АДМИНИСТРАТОР / РЕДАКТИРОВАНИЕ ДОКУМЕНТА':'АДМИНИСТРАТОР / НОВЫЙ ДОКУМЕНТ',`<form id="secretDocumentForm"><label>Название<input id="secretTitle" required maxlength="200" value="${safe(d?.title||'')}"></label><label>Текст документа и изображения<textarea id="secretBody" rows="12"></textarea></label><p>Чтобы вставить фотографию между абзацами, поставьте курсор в нужное место текста и выберите изображение. В тексте появится метка изображения.</p><label>Добавить изображение (JPG, PNG, WEBP, до 5 МБ)<input id="secretImageUpload" type="file" accept="image/jpeg,image/png,image/webp"></label><button id="refreshSecretPreview" type="button">ОБНОВИТЬ ПРЕДПРОСМОТР</button><div id="secretImagePreview" aria-live="polite"></div><p>Для удаления картинки из текста удалите её метку [[image:...]]. Сам файл останется в закрытом хранилище.</p><label>Путь к отдельному файлу в закрытом хранилище (необязательно)<input id="secretPath" value="${safe(d?.storage_path||'')}"></label>${d?`<label><input id="secretActive" type="checkbox" ${d.is_active!==false?'checked':''}> Документ активен</label>`:''}<div class="toolbar"><button id="saveSecretDocument">СОХРАНИТЬ</button><button id="cancelSecret" type="button">ОТМЕНА</button></div></form>`);
  $('#secretBody').value=d?.body||'';$('#cancelSecret').onclick=secretDocumentsAdmin;
+ $('#refreshSecretPreview').onclick=()=>renderSecretImagePreview().catch(fail);
+ renderSecretImagePreview().catch(fail);
+ $('#secretImageUpload').onchange=async()=>{
+  const input=$('#secretImageUpload'),file=input.files?.[0];if(!file)return;
+  if(!SECRET_IMAGE_TYPES[file.type]||file.size>5*1024*1024){toast('РАЗРЕШЕНЫ JPG, PNG, WEBP ДО 5 МБ');input.value='';return}
+  const field=$('#secretBody'),position=field.selectionStart,button=$('#saveSecretDocument');
+  input.disabled=true;button.disabled=true;
+  try{
+   const path=`documents/${crypto.randomUUID()}.${SECRET_IMAGE_TYPES[file.type]}`;
+   check(await db.storage.from('secret-documents').upload(path,file,{contentType:file.type,upsert:false}));
+   const marker=`\n[[image:${path}]]\n`;
+   field.setRangeText(marker,position,field.selectionEnd,'end');
+   toast('ФОТО ЗАГРУЖЕНО. СОХРАНИТЕ ДОКУМЕНТ');
+   await renderSecretImagePreview();
+  }catch(err){fail(err)}finally{input.value='';input.disabled=false;button.disabled=false}
+ };
  $('#secretDocumentForm').onsubmit=async e=>{e.preventDefault();try{
   const title=$('#secretTitle').value.trim(),bodyText=$('#secretBody').value,path=$('#secretPath').value.trim()||null;
   if(!title)throw Error('Введите название документа');
@@ -98,6 +132,7 @@ function secretDocumentForm(d){
   toast('ДОКУМЕНТ СОХРАНЁН');secretDocumentsAdmin();
  }catch(err){fail(err)}};
 }
+
 async function secretKeysAdmin(){
  if(!admin)return login();
  try{
