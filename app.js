@@ -18,7 +18,16 @@ function queueAlerts(){for(const e of events){if(e.critical&&!seenCritical.has(S
 function nextAlert(){const e=criticalQueue.shift();if(!e){showingCritical=false;return}showingCritical=true;tone(210,.35);show('ЭКСТРЕННОЕ ОПОВЕЩЕНИЕ',`<h2 style="color:#f39c9c">НАРУШЕНИЕ ПЕРИМЕТРА</h2><h3>${safe(e.title)}</h3><p>${safe(e.content)}</p><button id="ack">ПОДТВЕРДИТЬ ТРЕВОГУ</button>`,true);$('#ack').onclick=()=>{seenCritical.add(String(e.id));sessionStorage.setItem('pd_critical',JSON.stringify([...seenCritical]));showingCritical=false;modal.classList.remove('hidden');nextAlert();if(!showingCritical)hide()}}
 async function refreshEvents(){if(!connected){$('#signal').textContent='СВЯЗЬ: НЕ НАСТРОЕНА';return}try{const old=new Set(events.map(e=>e.id));events=check(await db.from('events').select('id,title,content,critical,published_at,created_at').lte('published_at',new Date().toISOString()).order('published_at',{ascending:false}));$('#signal').textContent='СВЯЗЬ: УСТАНОВЛЕНА';updateCount();if(old.size){for(const e of events){if(!old.has(e.id)&&!e.critical)toast('НОВОЕ СООБЩЕНИЕ: '+e.title)}}queueAlerts()}catch(e){$('#signal').textContent='СИГНАЛ ПОТЕРЯН';console.warn(e)}}
 function eventLog(){show('ЖУРНАЛ СОБЫТИЙ',`<p>ВХОДЯЩИЕ СООБЩЕНИЯ // ${events.length} ЗАПИСЕЙ</p>${events.map(e=>`<div class="entry"><button data-event="${e.id}">${read().has(String(e.id))?'':'● '}${safe(e.title)}</button><small>${new Date(e.published_at).toLocaleString('ru-RU')} ${e.critical?' // КРИТИЧЕСКОЕ':''}</small></div>`).join('')||'<p>СООБЩЕНИЙ НЕТ</p>'}`);body.querySelectorAll('[data-event]').forEach(b=>b.onclick=()=>{const e=events.find(x=>x.id===b.dataset.event);if(!e)return;const seen=read();seen.add(String(e.id));localStorage.setItem('pd_read',JSON.stringify([...seen]));updateCount();show('ЖУРНАЛ СОБЫТИЙ / ЗАПИСЬ',`<h3>${safe(e.title)}</h3><p style="white-space:pre-wrap">${safe(e.content)}</p><button id="backEvents">НАЗАД</button>`);$('#backEvents').onclick=eventLog})}
-function terminal(){show('КОМАНДНАЯ СТРОКА',`<p>СИСТЕМА ХОУКИНСА // ВВЕДИТЕ КОМАНДУ</p><form id="commandForm"><input id="cmd" autocomplete="off" placeholder="C:\\HNL>" required><button>ВЫПОЛНИТЬ</button></form><pre id="output">ВВЕДИТЕ HELP ДЛЯ СПРАВКИ</pre>`);$('#commandForm').onsubmit=e=>{e.preventDefault();const cmd=$('#cmd').value.trim().toUpperCase();$('#cmd').value='';tone();if(cmd==='OZZY')login();else if(cmd==='EXIT')hide();else if(cmd==='HELP')$('#output').textContent='HELP / STATUS / SIGNAL / CLEAR / EXIT / OZZY\nДОСТУП К СЕКРЕТНЫМ ФАЙЛАМ ПОКА НЕ ПОДКЛЮЧЁН';else if(cmd==='STATUS')$('#output').textContent='КАРАНТИН: АКТИВЕН\nИЗОЛЯЦИЯ: НАРУШЕНА';else if(cmd==='SIGNAL')$('#output').textContent=$('#signal').textContent;else if(cmd==='CLEAR')$('#output').textContent='';else $('#output').textContent='ДОСТУП ЗАПРЕЩЁН — СЕКРЕТНЫЙ АРХИВ НЕ ПОДКЛЮЧЁН'} }
+async function unlockArchiveCode(code){
+ if(!needConnection())return;
+ const response=await fetch(`${cfg.supabaseUrl.replace(/\/$/,'')}/functions/v1/unlock-secret-document`,{method:'POST',headers:{'Content-Type':'application/json','apikey':cfg.supabaseAnonKey},body:JSON.stringify({code})});
+ const payload=await response.json().catch(()=>({}));
+ if(!response.ok)throw Error(payload.error||'ДОСТУП ЗАПРЕЩЁН');
+ if(!payload.success||!payload.document)throw Error('НЕВЕРНЫЙ ОТВЕТ АРХИВА');
+ return payload.document;
+}
+function terminal(){show('КОМАНДНАЯ СТРОКА',`<p>СИСТЕМА ХОУКИНСА // ВВЕДИТЕ КОМАНДУ ИЛИ КОД ДОСТУПА</p><form id="commandForm"><input id="cmd" autocomplete="off" placeholder="C:\\HNL>" required><button>ВЫПОЛНИТЬ</button></form><pre id="output">ВВЕДИТЕ HELP ДЛЯ СПРАВКИ</pre>`);$('#commandForm').onsubmit=async e=>{e.preventDefault();const raw=$('#cmd').value.trim(),cmd=raw.toUpperCase();$('#cmd').value='';tone();if(cmd==='OZZY')return login();if(cmd==='EXIT')return hide();if(cmd==='HELP')return $('#output').textContent='HELP / STATUS / SIGNAL / CLEAR / EXIT / OZZY\nДЛЯ ОТКРЫТИЯ СЕКРЕТНОГО ДОКУМЕНТА ВВЕДИТЕ КОД';if(cmd==='STATUS')return $('#output').textContent='КАРАНТИН: АКТИВЕН\nИЗОЛЯЦИЯ: НАРУШЕНА';if(cmd==='SIGNAL')return $('#output').textContent=$('#signal').textContent;if(cmd==='CLEAR')return $('#output').textContent='';const output=$('#output');output.textContent='ПРОВЕРКА КОДА...';try{const doc=await unlockArchiveCode(raw);if(!doc)return;show('СЕКРЕТНЫЙ АРХИВ / '+doc.title,`<h3>${safe(doc.title)}</h3><p style="white-space:pre-wrap">${safe(doc.body||'')}</p>${doc.storage_path?'<p>ПРИЛОЖЕНИЕ: ДОСТУП К ФАЙЛУ ПОКА НЕ ПОДКЛЮЧЁН</p>':''}<button id="backTerminal">НАЗАД</button>`);$('#backTerminal').onclick=terminal}catch(err){output.textContent=err.message||'ДОСТУП ЗАПРЕЩЁН'}}}
+
 async function isAdmin(){if(!connected)return false;const {data:{user}}=await db.auth.getUser();if(!user)return false;const r=await db.from('directors').select('user_id').eq('user_id',user.id).maybeSingle();return !r.error&&!!r.data}
 // Each director uses their own Supabase Auth account and a unique login alias.
 const IDLE_MS=30*60*1000;
@@ -64,7 +73,47 @@ async function changeDirectorName(){
  $('#backDirector').onclick=director;
  $('#changeNameForm').onsubmit=async e=>{e.preventDefault();try{check(await db.rpc('set_director_login',{new_login:$('#newDirectorName').value.trim()}));toast('ИМЯ АДМИНИСТРАТОРА ИЗМЕНЕНО');director()}catch(err){fail(err)}};
 }
-async function adminTab(i){if(!admin)return login();if(i===6)return characterAdmin();if(i===3)return eventAdmin();show('АДМИНИСТРАТОР / '+['ДОКУМЕНТЫ','КЛЮЧИ ДОСТУПА','СООБЩЕНИЯ','УПРАВЛЕНИЕ СОБЫТИЯМИ','АНОМАЛИИ','СИСТЕМНЫЙ ЖУРНАЛ'][i],`<p>Этот модуль пока не перенесён в защищённую облачную версию. Данные секретных документов нельзя публиковать в открытой базе.</p><button id="back">НАЗАД</button>`);$('#back').onclick=director}
+async function adminTab(i){if(!admin)return login();if(i===0)return secretDocumentsAdmin();if(i===1)return secretKeysAdmin();if(i===6)return characterAdmin();if(i===3)return eventAdmin();show('АДМИНИСТРАТОР / '+['ДОКУМЕНТЫ','КЛЮЧИ ДОСТУПА','СООБЩЕНИЯ','УПРАВЛЕНИЕ СОБЫТИЯМИ','АНОМАЛИИ','СИСТЕМНЫЙ ЖУРНАЛ'][i],`<p>Этот модуль пока не перенесён в защищённую облачную версию. Данные секретных документов нельзя публиковать в открытой базе.</p><button id="back">НАЗАД</button>`);$('#back').onclick=director}
+
+// Secret archive: all document data is fetched through director-only RPC functions.
+async function secretDocumentsAdmin(){
+ if(!admin)return login();
+ try{
+  const docs=check(await db.rpc('director_list_secret_documents'))||[];
+  show('АДМИНИСТРАТОР / ДОКУМЕНТЫ',`<div class="toolbar"><button id="newSecretDocument">+ СОЗДАТЬ ДОКУМЕНТ</button><button id="backDirector">НАЗАД</button></div>${docs.map(d=>`<div class="entry admin-character"><span><strong>${safe(d.title)}</strong><small> // ${d.is_active===false?'ОТКЛЮЧЁН':'АКТИВЕН'}</small></span><div><button data-secret-edit="${safe(d.id)}">ИЗМЕНИТЬ</button> <button data-secret-delete="${safe(d.id)}">УДАЛИТЬ</button></div></div>`).join('')||'<p>Секретных документов пока нет.</p>'}`);
+  $('#newSecretDocument').onclick=()=>secretDocumentForm();$('#backDirector').onclick=director;
+  body.querySelectorAll('[data-secret-edit]').forEach(b=>b.onclick=()=>secretDocumentForm(docs.find(d=>d.id===b.dataset.secretEdit)));
+  body.querySelectorAll('[data-secret-delete]').forEach(b=>b.onclick=async()=>{if(!confirm('Удалить секретный документ? Связанные коды могут перестать работать.'))return;try{check(await db.rpc('director_delete_secret_document',{p_document_id:b.dataset.secretDelete}));toast('ДОКУМЕНТ УДАЛЁН');secretDocumentsAdmin()}catch(err){fail(err)}});
+ }catch(err){fail(err)}
+}
+function secretDocumentForm(d){
+ if(!admin)return login();
+ show(d?'АДМИНИСТРАТОР / РЕДАКТИРОВАНИЕ ДОКУМЕНТА':'АДМИНИСТРАТОР / НОВЫЙ ДОКУМЕНТ',`<form id="secretDocumentForm"><label>Название<input id="secretTitle" required maxlength="200" value="${safe(d?.title||'')}"></label><label>Текст документа<textarea id="secretBody" rows="12"></textarea></label><label>Путь к файлу в закрытом хранилище (необязательно)<input id="secretPath" value="${safe(d?.storage_path||'')}"></label>${d?`<label><input id="secretActive" type="checkbox" ${d.is_active!==false?'checked':''}> Документ активен</label>`:''}<div class="toolbar"><button>СОХРАНИТЬ</button><button id="cancelSecret" type="button">ОТМЕНА</button></div></form>`);
+ $('#secretBody').value=d?.body||'';$('#cancelSecret').onclick=secretDocumentsAdmin;
+ $('#secretDocumentForm').onsubmit=async e=>{e.preventDefault();try{
+  const title=$('#secretTitle').value.trim(),bodyText=$('#secretBody').value,path=$('#secretPath').value.trim()||null;
+  if(!title)throw Error('Введите название документа');
+  if(d)check(await db.rpc('director_update_secret_document',{p_document_id:d.id,p_title:title,p_body:bodyText,p_storage_path:path,p_is_active:$('#secretActive').checked}));
+  else check(await db.rpc('director_create_secret_document',{p_title:title,p_body:bodyText,p_storage_path:path}));
+  toast('ДОКУМЕНТ СОХРАНЁН');secretDocumentsAdmin();
+ }catch(err){fail(err)}};
+}
+async function secretKeysAdmin(){
+ if(!admin)return login();
+ try{
+  const docs=check(await db.rpc('director_list_secret_documents'))||[];
+  show('АДМИНИСТРАТОР / КЛЮЧИ ДОСТУПА',`<p>Создайте отдельный код для каждого секретного документа. Код не сохраняется в открытом виде, поэтому запишите его до отправки.</p>${docs.length?`<form id="newSecretKey"><label>Документ<select id="keyDocument" required>${docs.map(d=>`<option value="${safe(d.id)}">${safe(d.title)}</option>`).join('')}</select></label><label>Название ключа<input id="keyLabel" maxlength="120" required placeholder="Например: Доступ уровня 4"></label><label>Секретный код (от 8 символов)<input id="keyCode" minlength="8" maxlength="256" required autocomplete="off" spellcheck="false"></label><label>Срок действия (необязательно)<input id="keyExpiry" type="datetime-local"></label><div class="toolbar"><button>СОЗДАТЬ КЛЮЧ</button><button id="backDirector" type="button">НАЗАД</button></div></form>`:'<p>Сначала создайте хотя бы один документ.</p><button id="backDirector">НАЗАД</button>'}`);
+  $('#backDirector').onclick=director;
+  if(!docs.length)return;
+  $('#newSecretKey').onsubmit=async e=>{e.preventDefault();try{
+   const code=$('#keyCode').value,expiry=$('#keyExpiry').value;
+   if(code.trim().length<8)throw Error('Код должен содержать не менее 8 символов');
+   check(await db.rpc('director_create_document_key',{p_document_id:$('#keyDocument').value,p_code:code,p_label:$('#keyLabel').value.trim(),p_expires_at:expiry?new Date(expiry).toISOString():null}));
+   show('КЛЮЧ ДОСТУПА СОЗДАН',`<p>Ключ создан. Сохраните код в надёжном месте: посмотреть его в базе после создания нельзя.</p><button id="backKeys">НАЗАД К КЛЮЧАМ</button>`);$('#backKeys').onclick=secretKeysAdmin;toast('КЛЮЧ СОЗДАН');
+  }catch(err){fail(err)}};
+ }catch(err){fail(err)}
+}
+
 const STATUSES={alive:'Жив',injured:'Ранен',unconscious:'Без сознания',critical:'Критическое состояние',dead:'Погиб',missing:'Пропал без вести'};
 const INFECTIONS={none:'Отсутствует',low:'Низкое',medium:'Среднее',critical:'Критическое'};
 function ecg(status,health){if(status==='missing')return '<div class="ecg lost">СИГНАЛ ПОТЕРЯН</div>';const flat=status==='dead',type=flat?'flat':status==='critical'?'erratic':status==='unconscious'?'slow':status==='injured'||health<=70?'fast':'normal';const color=flat?'#e18484':type==='erratic'?'#e18d8d':type==='fast'?'#e5ca81':'#a3ecb1';const wave=flat?'M0 25 H280':type==='erratic'?'M0 25 H25 l7 -9 8 17 7 -8 6 -20 7 39 7 -22 H130 l7 -8 7 14 8 -22 7 35 8 -19 H280':type==='slow'?'M0 25 H70 l7 -2 7 3 7 -9 7 16 7 -8 H220 l7 -2 7 3 7 -9 7 16 7 -8 H280':'M0 25 H40 l7 -3 7 4 7 -19 7 36 7 -18 H140 l7 -3 7 4 7 -19 7 36 7 -18 H240 l7 -3 7 4 7 -19 7 36 7 -18 H280';return `<div class="ecg ${type}" style="--ecg-color:${color}"><svg viewBox="0 0 560 50" preserveAspectRatio="none"><path class="ecg-line" d="${wave}" stroke="${color}" stroke-width="2" fill="none"/><path class="ecg-line" d="${wave}" transform="translate(280 0)" stroke="${color}" stroke-width="2" fill="none"/></svg></div>`}
